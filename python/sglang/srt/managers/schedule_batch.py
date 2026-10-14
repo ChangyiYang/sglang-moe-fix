@@ -79,6 +79,8 @@ import msgspec
 import numpy as np
 import torch
 
+from sglang.srt.soft_prompt.scheduling import soft_prompt_extend_overrides
+
 from sglang.srt.beam_search.batch_tail import (
     BeamTail,
     append_beam_tail,
@@ -1137,6 +1139,8 @@ class Req(ReqDllmMixin):
 
         self.extra_key = extra_key
         self.cache_salt = cache_salt or None
+        # Set by soft_prompt.scheduling.attach_soft_prompt for soft-prompt requests.
+        self.soft_prompt = None
         self.lora_id = lora_id
         self.routing_key = routing_key
 
@@ -2875,6 +2879,17 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
                         req.positional_embed_overrides.embeds[list(indices)]
                     )
                     all_replace_positions.extend(positions)
+            if req.soft_prompt is not None:
+                # Placeholder positions inside this extend chunk get the tenant's
+                # embeddings; positions already in the cached prefix need nothing.
+                sp_overrides = soft_prompt_extend_overrides(
+                    req, pre_len, req.extend_len, input_id_pointer
+                )
+                if sp_overrides is not None:
+                    has_replace_embeds = True
+                    sp_embeds, sp_positions = sp_overrides
+                    all_replace_embeds.append(sp_embeds)
+                    all_replace_positions.extend(sp_positions)
             input_id_pointer += input_id_lens[i]
 
             multimodal_inputs.append(req.multimodal_inputs)
@@ -2968,8 +2983,10 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
             extend_input_logprob_token_ids = None
 
         if has_replace_embeds:
-            replace_embeds_tensor = torch.cat(all_replace_embeds, dim=0).to(
-                self.device, non_blocking=True
+            # Soft-prompt rows already live on the device; other overrides may be on CPU.
+            replace_embeds_tensor = torch.cat(
+                [e.to(self.device, non_blocking=True) for e in all_replace_embeds],
+                dim=0,
             )
             replace_positions_tensor = torch.tensor(
                 all_replace_positions, dtype=torch.long, device=self.device

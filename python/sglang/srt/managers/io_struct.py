@@ -323,6 +323,10 @@ class GenerateReqInput:
     priority: Optional[int] = None
     # Extra cache key for caller-defined request classification.
     extra_key: Optional[Union[List[str], str]] = None
+    # Name of a registered soft prompt (see /load_soft_prompt). The prompt text must contain
+    # the soft-prompt marker (or input_ids a placeholder run); those positions receive the
+    # tenant's learned embeddings and the prefix cache is namespaced by the soft prompt.
+    soft_prompt: Optional[Union[List[Optional[str]], str]] = None
 
     # Whether to disallow logging for this request (e.g. due to ZDR)
     no_logs: bool = False
@@ -571,7 +575,7 @@ class GenerateReqInput:
             self.token_ids_logprob = None
         if self.return_sampling_mask is None:
             self.return_sampling_mask = False
-        for field_name in ("extra_key", "cache_salt"):
+        for field_name in ("extra_key", "cache_salt", "soft_prompt"):
             value = getattr(self, field_name)
             if value is not None and not isinstance(value, str):
                 raise ValueError(
@@ -608,6 +612,7 @@ class GenerateReqInput:
         self._normalize_return_hidden_states(num)
         self._normalize_custom_logit_processor(num)
         self._normalize_extra_key(num)
+        self._normalize_soft_prompt(num)
         self._normalize_cache_salt(num)
         self._normalize_kv_hints(num)
         self._normalize_bootstrap_params(num)
@@ -865,6 +870,24 @@ class GenerateReqInput:
         else:
             raise ValueError("extra_key should be a list or a string.")
 
+    def _normalize_soft_prompt(self, num):
+        """Normalize soft_prompt for batch processing (same shape rules as extra_key)."""
+        if self.soft_prompt is None:
+            return
+        if isinstance(self.soft_prompt, str):
+            self.soft_prompt = [self.soft_prompt or None] * num
+        elif isinstance(self.soft_prompt, list):
+            if len(self.soft_prompt) != self.batch_size:
+                raise ValueError(
+                    "The length of soft_prompt should be equal to the batch size."
+                )
+            if any(v is not None and not isinstance(v, str) for v in self.soft_prompt):
+                raise ValueError("Every soft_prompt should be a string or None.")
+            self.soft_prompt = [v or None for v in self.soft_prompt]
+            self.soft_prompt = self.soft_prompt * self.parallel_sample_num
+        else:
+            raise ValueError("soft_prompt should be a list or a string.")
+
     def _normalize_cache_salt(self, num):
         """Normalize cache_salt for batch processing."""
         if self.cache_salt is None:
@@ -1036,6 +1059,7 @@ class GenerateReqInput:
             max_thinking_tokens=self.max_thinking_tokens,
             priority=self.priority,
             extra_key=self.extra_key[i] if self.extra_key is not None else None,
+            soft_prompt=self.soft_prompt[i] if self.soft_prompt is not None else None,
             cache_salt=(self.cache_salt[i] if self.cache_salt is not None else None),
             kv_hints=(self.kv_hints[i] if self.kv_hints is not None else None),
             no_logs=self.no_logs,
@@ -1133,6 +1157,11 @@ class TokenizedGenerateReqInput(BaseReq, kw_only=True):
 
     # Extra cache key for caller-defined request classification.
     extra_key: Optional[str] = None
+    # Resolved soft prompt: registered name, its version, and the absolute position of the
+    # first placeholder token in input_ids (the run length is the registered prompt length).
+    soft_prompt: Optional[str] = None
+    soft_prompt_version: Optional[int] = None
+    soft_prompt_start: Optional[int] = None
 
     # Whether to disallow logging for this request (e.g. due to ZDR)
     no_logs: bool = False
@@ -2562,6 +2591,30 @@ class LoRAUpdateOutput(BaseReq, kw_only=True):
 LoadLoRAAdapterReqOutput = UnloadLoRAAdapterReqOutput = (
     LoadLoRAAdapterFromTensorsReqOutput
 ) = LoRAUpdateOutput
+
+
+class LoadSoftPromptReqInput(BaseReq, kw_only=True):
+    # Name used by requests (`soft_prompt=<name>`).
+    name: str
+    # Path to a safetensors file holding exactly one tensor of shape [length, hidden_size].
+    path: str
+    # Assigned by the TokenizerManager; bumps on every (re)load so cached prefixes of an
+    # older prompt with the same name are never reused.
+    version: Optional[int] = None
+
+
+class UnloadSoftPromptReqInput(BaseReq, kw_only=True):
+    name: str
+
+
+class SoftPromptUpdateOutput(BaseReq, kw_only=True):
+    success: bool
+    error_message: Optional[str] = None
+    # name -> prompt length (number of placeholder tokens) for all loaded prompts.
+    loaded: Optional[Dict[str, int]] = None
+
+
+LoadSoftPromptReqOutput = UnloadSoftPromptReqOutput = SoftPromptUpdateOutput
 
 
 class BlockReqType(Enum):

@@ -724,6 +724,7 @@ class ModelRunner:
         )
         self.maybe_apply_post_load_model_transforms()
         self.maybe_init_lora_manager()
+        self.maybe_init_soft_prompt_pool()
         self.maybe_enable_batch_invariant_mode()
         self.configure_kv_cache_dtype()
 
@@ -813,6 +814,35 @@ class ModelRunner:
         supports_torch_tp = getattr(self.model, "supports_torch_tp", False)
         if get_parallel().tp_size > 1 and supports_torch_tp:
             self.apply_torch_tp()
+
+    def maybe_init_soft_prompt_pool(self):
+        """Allocate the multi-tenant soft-prompt pool (before KV sizing) and load startup prompts."""
+        from sglang.srt.soft_prompt.pool import (
+            SoftPromptPool,
+            read_soft_prompt_tensor,
+            set_soft_prompt_pool,
+        )
+        from sglang.srt.soft_prompt.utils import parse_soft_prompt_paths
+
+        lora_args = get_lora()
+        if not lora_args.enable_soft_prompt:
+            return
+        if lora_args.soft_prompt_placeholder_id is None:
+            raise ValueError("--enable-soft-prompt requires --soft-prompt-placeholder-id")
+        if self.is_draft_worker:
+            return  # the draft model reads token ids only; the pool belongs to the target
+        weight = self.model.get_input_embeddings().weight
+        pool = SoftPromptPool(
+            max_prompts=lora_args.max_soft_prompts,
+            max_len=lora_args.max_soft_prompt_len,
+            hidden_size=weight.shape[-1],
+            dtype=weight.dtype,
+            device=weight.device,
+        )
+        for name, path in parse_soft_prompt_paths(lora_args.soft_prompt_paths):
+            pool.load(name, read_soft_prompt_tensor(path), version=0)
+            logger.info("Loaded soft prompt %s from %s", name, path)
+        set_soft_prompt_pool(pool)
 
     def maybe_init_lora_manager(self):
         if self.spec_algorithm.is_uno():

@@ -119,7 +119,12 @@ from sglang.srt.lora.lora_drainer import LoRADrainer
 from sglang.srt.lora.lora_overlap_loader import LoRAOverlapLoader
 from sglang.srt.managers.disagg_service import maybe_create_ascend_config_store
 from sglang.srt.managers.hisparse_coordinator import HiSparseCoordinator
+from sglang.srt.soft_prompt.pool import get_soft_prompt_pool, read_soft_prompt_tensor
+from sglang.srt.soft_prompt.scheduling import attach_soft_prompt
 from sglang.srt.managers.io_struct import (
+    LoadSoftPromptReqInput,
+    SoftPromptUpdateOutput,
+    UnloadSoftPromptReqInput,
     AbortReq,
     ActiveRanksOutput,
     AddExternalCorpusReqInput,
@@ -1851,6 +1856,8 @@ class Scheduler(
                     self.load_lora_adapter_from_tensors,
                 ),
                 (UnloadLoRAAdapterReqInput, self.unload_lora_adapter),
+                (LoadSoftPromptReqInput, self.load_soft_prompt),
+                (UnloadSoftPromptReqInput, self.unload_soft_prompt),
                 (PauseGenerationReqInput, self.pause_generation),
                 (ContinueGenerationReqInput, self.continue_generation),
                 (ConfigureLoggingReq, self.configure_logging),
@@ -2943,6 +2950,8 @@ class Scheduler(
                 token_indices_to_pool=recv_req.token_indices_to_pool,
             )
             req.tokenizer = self.tokenizer
+            if recv_req.soft_prompt is not None:
+                attach_soft_prompt(req, recv_req)
 
             if radix_native_session:
                 req.session_generation = self.tree_cache.ensure_session_generation(
@@ -5897,6 +5906,32 @@ class Scheduler(
                 lora_id=recv_req.lora_id, lora_name=recv_req.lora_name
             )
         return result
+
+    def load_soft_prompt(
+        self, recv_req: LoadSoftPromptReqInput
+    ) -> SoftPromptUpdateOutput:
+        """Load (or reload in place) a tenant soft prompt into the GPU pool."""
+        try:
+            pool = get_soft_prompt_pool()
+            if pool is None:
+                raise ValueError("soft prompt pool is not initialized")
+            tensor = read_soft_prompt_tensor(recv_req.path)
+            pool.load(recv_req.name, tensor, recv_req.version or 0)
+            return SoftPromptUpdateOutput(success=True, loaded=pool.loaded())
+        except Exception as e:  # report to the caller instead of killing the scheduler
+            return SoftPromptUpdateOutput(success=False, error_message=str(e))
+
+    def unload_soft_prompt(
+        self, recv_req: UnloadSoftPromptReqInput
+    ) -> SoftPromptUpdateOutput:
+        try:
+            pool = get_soft_prompt_pool()
+            if pool is None:
+                raise ValueError("soft prompt pool is not initialized")
+            pool.unload(recv_req.name)
+            return SoftPromptUpdateOutput(success=True, loaded=pool.loaded())
+        except Exception as e:
+            return SoftPromptUpdateOutput(success=False, error_message=str(e))
 
     def load_lora_adapter_from_tensors(
         self, recv_req: LoadLoRAAdapterFromTensorsReqInput
