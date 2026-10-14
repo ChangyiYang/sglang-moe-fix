@@ -3622,6 +3622,10 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
         # Decode embeds the last output token via embed_tokens; clear the stale
         # prefill-time tensor so it doesn't leak into ForwardBatch.
         self.input_embeds = None
+        # Embedding overrides apply to extend tokens only. Leaving them set would make every
+        # later decode step of this batch skip the decode CUDA graph (it refuses overrides).
+        self.replace_embeds = None
+        self.replace_positions = None
 
         self.mamba_cow_src_indices = None
         self.mamba_cow_dst_indices = None
