@@ -151,6 +151,8 @@ from sglang.srt.managers.io_struct import (
     SetInternalStateReq,
     SlowDownReqInput,
     UnloadLoRAAdapterReqInput,
+    LoadSoftPromptReqInput,
+    UnloadSoftPromptReqInput,
     UpdateWeightFromDiskReqInput,
     UpdateWeightsFromDistributedReqInput,
     UpdateWeightsFromIPCReqInput,
@@ -1647,6 +1649,35 @@ async def unload_lora_adapter(
     result = await _global_state.tokenizer_manager.unload_lora_adapter(obj, request)
     status_code = HTTPStatus.OK if result.success else HTTPStatus.BAD_REQUEST
     return ORJSONResponse(msgspec_to_builtins(result), status_code=status_code)
+
+
+@app.api_route("/load_soft_prompt", methods=["POST"])
+@auth_level(AuthLevel.ADMIN_OPTIONAL)
+async def load_soft_prompt(
+    obj: Annotated[LoadSoftPromptReqInput, Body()], request: Request
+):
+    """Load (or reload) a tenant soft prompt into the GPU pool."""
+    result = await _global_state.tokenizer_manager.load_soft_prompt(obj, request)
+    status_code = HTTPStatus.OK if result.success else HTTPStatus.BAD_REQUEST
+    return ORJSONResponse(msgspec_to_builtins(result), status_code=status_code)
+
+
+@app.api_route("/unload_soft_prompt", methods=["POST"])
+@auth_level(AuthLevel.ADMIN_OPTIONAL)
+async def unload_soft_prompt(
+    obj: Annotated[UnloadSoftPromptReqInput, Body()], request: Request
+):
+    """Remove a tenant soft prompt from the GPU pool."""
+    result = await _global_state.tokenizer_manager.unload_soft_prompt(obj, request)
+    status_code = HTTPStatus.OK if result.success else HTTPStatus.BAD_REQUEST
+    return ORJSONResponse(msgspec_to_builtins(result), status_code=status_code)
+
+
+@app.api_route("/list_soft_prompts", methods=["GET"])
+async def list_soft_prompts():
+    """Registered soft prompts: name -> {length, version}."""
+    registry = _global_state.tokenizer_manager.soft_prompt_registry
+    return {name: {"length": l, "version": v} for name, (l, v) in registry.items()}
 
 
 @app.api_route("/open_session", methods=["GET", "POST"])

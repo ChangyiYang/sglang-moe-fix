@@ -52,6 +52,9 @@ from sglang.srt.managers.io_struct import (
     LoadLoRAAdapterReqInput,
     LoadLoRAAdapterReqOutput,
     LoRAUpdateOutput,
+    LoadSoftPromptReqInput,
+    SoftPromptUpdateOutput,
+    UnloadSoftPromptReqInput,
     OpenSessionReqInput,
     PdRoleSwitchReqInput,
     PdRoleSwitchReqOutput,
@@ -138,6 +141,7 @@ _COMMUNICATOR_SPECS = [
     ("begin_weight_update", BeginWeightUpdateReqOutput),
     ("end_weight_update", EndWeightUpdateReqOutput),
     ("update_lora_adapter", LoRAUpdateOutput),
+    ("update_soft_prompt", SoftPromptUpdateOutput),
     ("dumper_control", DumperControlReqOutput),
     ("scale_elastic_ep", ScaleElasticEPReqOutput),
 ]
@@ -823,6 +827,62 @@ class TokenizerControlMixin:
                 success=False,
                 error_message=str(e),
             )
+
+    async def load_soft_prompt(
+        self: TokenizerManager,
+        obj: LoadSoftPromptReqInput,
+        _: Optional[fastapi.Request] = None,
+    ) -> SoftPromptUpdateOutput:
+        self.auto_create_handle_loop()
+        try:
+            if not get_lora().enable_soft_prompt:
+                raise ValueError(
+                    "Soft prompts are not enabled. Please set `--enable-soft-prompt`."
+                )
+            if get_parallel().dp_size != 1:
+                raise ValueError("data-parallel replicas are not supported for soft prompts")
+            async with self.soft_prompt_update_lock:
+                obj.version = self.soft_prompt_next_version
+                self.soft_prompt_next_version += 1
+                results = await self.update_soft_prompt_communicator(obj)
+                failed = [r for r in results if not r.success]
+                if failed:
+                    return failed[0]
+                length = results[0].loaded[obj.name]
+                self.soft_prompt_registry[obj.name] = (length, obj.version)
+                logger.info(
+                    "Loaded soft prompt %s (length=%d, version=%d) from %s",
+                    obj.name,
+                    length,
+                    obj.version,
+                    obj.path,
+                )
+                return results[0]
+        except ValueError as e:
+            return SoftPromptUpdateOutput(success=False, error_message=str(e))
+
+    async def unload_soft_prompt(
+        self: TokenizerManager,
+        obj: UnloadSoftPromptReqInput,
+        _: Optional[fastapi.Request] = None,
+    ) -> SoftPromptUpdateOutput:
+        self.auto_create_handle_loop()
+        try:
+            if not get_lora().enable_soft_prompt:
+                raise ValueError(
+                    "Soft prompts are not enabled. Please set `--enable-soft-prompt`."
+                )
+            async with self.soft_prompt_update_lock:
+                if obj.name not in self.soft_prompt_registry:
+                    raise ValueError(f"soft prompt {obj.name!r} is not loaded")
+                # Stop admitting new requests first. Known limitation: a request already
+                # tokenized against this prompt but not yet prefilled fails at prefill.
+                del self.soft_prompt_registry[obj.name]
+                results = await self.update_soft_prompt_communicator(obj)
+                failed = [r for r in results if not r.success]
+                return failed[0] if failed else results[0]
+        except ValueError as e:
+            return SoftPromptUpdateOutput(success=False, error_message=str(e))
 
     async def unload_lora_adapter(
         self: TokenizerManager,

@@ -110,3 +110,30 @@ class Lora(msgspec.Struct):
         float,
         "When any LoRA adapter request waits longer than this threshold (in seconds), the scheduler will selectively drain one running adapter to make room. This mitigates extreme tail latency under high or skewed workloads by preventing a small set of adapters from monopolizing batch slots. Set to 0 to disable draining (default).",
     ] = 0.0
+
+    # -------------------------------------------------------------------------
+    # Soft prompts (input-only learned embeddings, one per tenant)
+    # -------------------------------------------------------------------------
+    enable_soft_prompt: A[
+        bool,
+        "Enable multi-tenant soft prompts. Requests name a registered prompt via `soft_prompt`; placeholder positions receive the prompt's embeddings and the prefix cache is namespaced per prompt.",
+    ] = False
+    max_soft_prompts: A[
+        int,
+        "Maximum number of soft prompts resident in the GPU pool at once.",
+    ] = 64
+    max_soft_prompt_len: A[
+        int,
+        "Maximum soft prompt length in tokens (pool row width).",
+    ] = 1024
+    soft_prompt_placeholder_id: A[
+        Optional[int],
+        "Token id used as the soft-prompt placeholder. Must be a vocabulary id the model never needs to see as real text (e.g. an unused padded-vocab row). Required when --enable-soft-prompt is set.",
+    ] = None
+    soft_prompt_paths: A[
+        Optional[List[str]],
+        Arg(
+            help="Soft prompts to load at startup, as NAME=PATH (safetensors with one [length, hidden_size] tensor).",
+            nargs="*",
+        ),
+    ] = None

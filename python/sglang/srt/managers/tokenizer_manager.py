@@ -148,6 +148,12 @@ from sglang.srt.observability.request_metrics_exporter import (
     RequestMetricsExporterManager,
 )
 from sglang.srt.observability.trace import SpanAttributes, extract_trace_headers
+from sglang.srt.soft_prompt.utils import (
+    SOFT_PROMPT_LOGIT_BIAS,
+    SOFT_PROMPT_MARKER,
+    parse_soft_prompt_paths,
+    soft_prompt_length,
+)
 from sglang.srt.runtime_context import (
     assert_published,
     get_context,
@@ -786,6 +792,13 @@ class TokenizerManager(TokenizerControlMixin, TokenizerManagerScoreMixin):
         # Please note that, unlike `model_update_lock`, this does not block inference, allowing
         # LoRA updates and inference to overlap.
         self.lora_update_lock = asyncio.Lock()
+        # Soft prompts: name -> (length, version). Startup prompts get version 0; every
+        # dynamic (re)load gets a fresh version that is folded into the prefix-cache key.
+        self.soft_prompt_registry: Dict[str, Tuple[int, int]] = {}
+        self.soft_prompt_next_version = 1
+        self.soft_prompt_update_lock = asyncio.Lock()
+        for name, path in parse_soft_prompt_paths(get_lora().soft_prompt_paths):
+            self.soft_prompt_registry[name] = (soft_prompt_length(path), 0)
         # A cache for mapping the lora_name for LoRA adapters that have been loaded at any
         # point to their latest LoRARef objects, so that they can be
         # dynamically loaded if needed for inference
@@ -1282,10 +1295,75 @@ class TokenizerManager(TokenizerControlMixin, TokenizerManagerScoreMixin):
         else:
             mm_inputs = None
 
+        soft_prompt_meta = None
+        if isinstance(obj, GenerateReqInput) and obj.soft_prompt is not None:
+            input_ids, soft_prompt_meta = self._resolve_soft_prompt(
+                obj, input_text, input_ids, input_embeds, mm_inputs
+            )
+
         self._validate_one_request(obj, input_ids)
-        return self._create_tokenized_object(
+        tokenized_obj = self._create_tokenized_object(
             obj, input_text, input_ids, input_embeds, mm_inputs, token_type_ids
         )
+        if soft_prompt_meta is not None:
+            (
+                tokenized_obj.soft_prompt,
+                tokenized_obj.soft_prompt_version,
+                tokenized_obj.soft_prompt_start,
+            ) = soft_prompt_meta
+        return tokenized_obj
+
+    def _resolve_soft_prompt(
+        self: TokenizerManager, obj, input_text, input_ids, input_embeds, mm_inputs
+    ):
+        """Place the placeholder run for ``obj.soft_prompt`` and return (input_ids, meta).
+
+        Text prompts mark the position with SOFT_PROMPT_MARKER (exactly once); token-id
+        prompts must already contain one contiguous run of the placeholder id whose length
+        equals the registered prompt length.
+        """
+        lora_args = get_lora()
+        if not lora_args.enable_soft_prompt:
+            raise ValueError(
+                "soft_prompt was given but soft prompts are disabled; launch with --enable-soft-prompt."
+            )
+        if input_embeds is not None or mm_inputs is not None:
+            raise ValueError("soft_prompt cannot be combined with input_embeds or multimodal inputs.")
+        name = obj.soft_prompt
+        if name not in self.soft_prompt_registry:
+            raise ValueError(f"soft prompt {name!r} is not loaded.")
+        length, version = self.soft_prompt_registry[name]
+        placeholder = lora_args.soft_prompt_placeholder_id
+
+        if obj.input_ids is None and input_text is not None:
+            if input_text.count(SOFT_PROMPT_MARKER) != 1:
+                raise ValueError(
+                    f"a text prompt with soft_prompt must contain {SOFT_PROMPT_MARKER!r} exactly once."
+                )
+            pre, post = input_text.split(SOFT_PROMPT_MARKER)
+            input_ids = (
+                (self.tokenizer.encode(pre) if pre else [])
+                + [placeholder] * length
+                + self.tokenizer.encode(post, add_special_tokens=False)
+            )
+        positions = [i for i, t in enumerate(input_ids) if t == placeholder]
+        if not positions:
+            raise ValueError(
+                f"input_ids for soft prompt {name!r} contain no placeholder id {placeholder}."
+            )
+        start = positions[0]
+        if positions != list(range(start, start + length)):
+            raise ValueError(
+                f"soft prompt {name!r} needs exactly one contiguous run of {length} placeholder ids."
+            )
+
+        # The placeholder id is input-only: never let it be sampled.
+        sampling_params = dict(obj.sampling_params or {})
+        logit_bias = dict(sampling_params.get("logit_bias") or {})
+        logit_bias[str(placeholder)] = SOFT_PROMPT_LOGIT_BIAS
+        sampling_params["logit_bias"] = logit_bias
+        obj.sampling_params = sampling_params
+        return input_ids, (name, version, start)
 
     @staticmethod
     def _normalize_mm_content_hashes(obj: GenerateReqInput) -> None:
