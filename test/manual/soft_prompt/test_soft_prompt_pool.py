@@ -62,7 +62,9 @@ def test_extend_overrides_clip_to_chunk(monkeypatch):
     req = SimpleNamespace(soft_prompt=SoftPromptRef("t", 0, start=3, length=6))
 
     # Whole prompt in one chunk, no cached prefix: placeholders at absolute 3..8.
-    e, pos = soft_prompt_extend_overrides(req, pre_len=0, extend_len=12, flat_offset=100)
+    e, pos = soft_prompt_extend_overrides(
+        req, pre_len=0, extend_len=12, flat_offset=100
+    )
     assert pos == list(range(103, 109)) and torch.equal(e, emb)
 
     # Prefix cache covers absolute 0..4 -> only offsets 2..5 are recomputed.
@@ -74,7 +76,10 @@ def test_extend_overrides_clip_to_chunk(monkeypatch):
     assert pos == [10, 11] and torch.equal(e, emb[0:2])
 
     # Prompt entirely inside the cached prefix -> nothing to replace.
-    assert soft_prompt_extend_overrides(req, pre_len=9, extend_len=3, flat_offset=0) is None
+    assert (
+        soft_prompt_extend_overrides(req, pre_len=9, extend_len=3, flat_offset=0)
+        is None
+    )
 
 
 def test_file_helpers(tmp_path):

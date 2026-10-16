@@ -79,8 +79,6 @@ import msgspec
 import numpy as np
 import torch
 
-from sglang.srt.soft_prompt.scheduling import soft_prompt_extend_overrides
-
 from sglang.srt.beam_search.batch_tail import (
     BeamTail,
     append_beam_tail,
@@ -143,6 +141,7 @@ from sglang.srt.observability.req_time_stats import (
 from sglang.srt.sampling.sampling_batch_info import SamplingBatchInfo
 from sglang.srt.sampling.sampling_mask import SamplingMaskRows
 from sglang.srt.sampling.sampling_params import SamplingParams
+from sglang.srt.soft_prompt.scheduling import soft_prompt_extend_overrides
 from sglang.srt.utils import flatten_nested_list
 from sglang.srt.utils.token_sequence_matcher import TokenSequenceMatcher
 

@@ -828,7 +828,9 @@ class ModelRunner:
         if not lora_args.enable_soft_prompt:
             return
         if lora_args.soft_prompt_placeholder_id is None:
-            raise ValueError("--enable-soft-prompt requires --soft-prompt-placeholder-id")
+            raise ValueError(
+                "--enable-soft-prompt requires --soft-prompt-placeholder-id"
+            )
         if self.is_draft_worker:
             return  # the draft model reads token ids only; the pool belongs to the target
         weight = self.model.get_input_embeddings().weight

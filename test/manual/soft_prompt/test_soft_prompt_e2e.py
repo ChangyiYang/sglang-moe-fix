@@ -20,7 +20,6 @@ import time
 import unittest
 
 import requests
-import torch
 from safetensors.torch import load_file, save_file
 
 PORT = int(os.environ.get("SP_PORT", "31555"))
@@ -33,9 +32,21 @@ PROMPTS = [
 
 
 def _launch(model, extra):
-    cmd = [sys.executable, "-m", "sglang.launch_server", "--model-path", model,
-           "--port", str(PORT), "--mem-fraction-static", "0.6",
-           "--disable-cuda-graph", "--random-seed", "0", *extra]
+    cmd = [
+        sys.executable,
+        "-m",
+        "sglang.launch_server",
+        "--model-path",
+        model,
+        "--port",
+        str(PORT),
+        "--mem-fraction-static",
+        "0.6",
+        "--disable-cuda-graph",
+        "--random-seed",
+        "0",
+        *extra,
+    ]
     proc = subprocess.Popen(cmd)
     for _ in range(600):
         try:
@@ -97,24 +108,38 @@ class TestSoftPromptE2E(unittest.TestCase):
         proc = _launch(self.virtual, [])
         try:
             bias = {str(t): -1e4 for t in vids}
-            ref = [_generate(self._prompt_ids(p, vids), logit_bias=bias)[0] for p in PROMPTS]
+            ref = [
+                _generate(self._prompt_ids(p, vids), logit_bias=bias)[0]
+                for p in PROMPTS
+            ]
         finally:
             _stop(proc)
 
         # Same prompts through the pool on the base model; a second tenant gets a
         # perturbed prompt to check cache isolation.
         tensor = next(iter(load_file(self.tensor_path).values()))
-        other = os.path.join(os.path.dirname(self.tensor_path), "_sp_e2e_other.safetensors")
+        other = os.path.join(
+            os.path.dirname(self.tensor_path), "_sp_e2e_other.safetensors"
+        )
         save_file({"soft_prompt": tensor.flip(0).contiguous()}, other)
         proc = _launch(
             self.base,
-            ["--enable-soft-prompt", "--soft-prompt-placeholder-id", str(self.placeholder),
-             "--max-soft-prompt-len", str(max(length, 256)),
-             "--soft-prompt-paths", f"tenant_a={self.tensor_path}"],
+            [
+                "--enable-soft-prompt",
+                "--soft-prompt-placeholder-id",
+                str(self.placeholder),
+                "--max-soft-prompt-len",
+                str(max(length, 256)),
+                "--soft-prompt-paths",
+                f"tenant_a={self.tensor_path}",
+            ],
         )
         try:
-            r = requests.post(f"{URL}/load_soft_prompt",
-                              json={"name": "tenant_b", "path": other}, timeout=120)
+            r = requests.post(
+                f"{URL}/load_soft_prompt",
+                json={"name": "tenant_b", "path": other},
+                timeout=120,
+            )
             self.assertEqual(r.status_code, 200, r.text)
             run = [self.placeholder] * length
             got, metas = [], []
@@ -123,39 +148,70 @@ class TestSoftPromptE2E(unittest.TestCase):
                 got.append(out)
                 metas.append(meta)
             for i, (a, b) in enumerate(zip(ref, got)):
-                self.assertEqual(a, b, f"prompt {i}: pool output differs from virtual-token reference")
+                self.assertEqual(
+                    a,
+                    b,
+                    f"prompt {i}: pool output differs from virtual-token reference",
+                )
 
             # Same tenant again: the soft-prompt prefix must come from the cache.
-            _, meta = _generate(self._prompt_ids(PROMPTS[0], run), soft_prompt="tenant_a")
+            _, meta = _generate(
+                self._prompt_ids(PROMPTS[0], run), soft_prompt="tenant_a"
+            )
             self.assertGreaterEqual(meta.get("cached_tokens", 0), length)
             # Other tenant, identical ids: must not reuse tenant_a's KV and must differ.
-            out_b, meta_b = _generate(self._prompt_ids(PROMPTS[0], run), soft_prompt="tenant_b")
+            out_b, meta_b = _generate(
+                self._prompt_ids(PROMPTS[0], run), soft_prompt="tenant_b"
+            )
             self.assertLess(meta_b.get("cached_tokens", 0), length)
             self.assertNotEqual(out_b, got[0])
             # Text marker path expands to the same ids.
-            text = "<|im_start|>user\n<|soft_prompt|>" + PROMPTS[0] + "<|im_end|>\n<|im_start|>assistant\n"
-            r = requests.post(f"{URL}/generate", json={
-                "text": text, "soft_prompt": "tenant_a",
-                "sampling_params": {"temperature": 0, "max_new_tokens": 96}}, timeout=600)
+            text = (
+                "<|im_start|>user\n<|soft_prompt|>"
+                + PROMPTS[0]
+                + "<|im_end|>\n<|im_start|>assistant\n"
+            )
+            r = requests.post(
+                f"{URL}/generate",
+                json={
+                    "text": text,
+                    "soft_prompt": "tenant_a",
+                    "sampling_params": {"temperature": 0, "max_new_tokens": 96},
+                },
+                timeout=600,
+            )
             self.assertEqual(r.status_code, 200, r.text)
             self.assertEqual(r.json()["output_ids"], got[0])
             # Batched request: one soft-prompt item and one plain item.
             plain = self._prompt_ids(PROMPTS[1], [])
-            r = requests.post(f"{URL}/generate", json={
-                "input_ids": [self._prompt_ids(PROMPTS[0], run), plain],
-                "soft_prompt": ["tenant_a", None],
-                "sampling_params": {"temperature": 0, "max_new_tokens": 96}}, timeout=600)
+            r = requests.post(
+                f"{URL}/generate",
+                json={
+                    "input_ids": [self._prompt_ids(PROMPTS[0], run), plain],
+                    "soft_prompt": ["tenant_a", None],
+                    "sampling_params": {"temperature": 0, "max_new_tokens": 96},
+                },
+                timeout=600,
+            )
             self.assertEqual(r.status_code, 200, r.text)
             batch = r.json()
             self.assertEqual(batch[0]["output_ids"], got[0])
             ref_plain, _ = _generate(plain)
             self.assertEqual(batch[1]["output_ids"], ref_plain)
             # Unloaded / unknown prompt is rejected cleanly.
-            r = requests.post(f"{URL}/unload_soft_prompt", json={"name": "tenant_b"}, timeout=60)
+            r = requests.post(
+                f"{URL}/unload_soft_prompt", json={"name": "tenant_b"}, timeout=60
+            )
             self.assertEqual(r.status_code, 200, r.text)
-            r = requests.post(f"{URL}/generate", json={
-                "input_ids": self._prompt_ids(PROMPTS[0], run), "soft_prompt": "tenant_b",
-                "sampling_params": {"max_new_tokens": 4}}, timeout=60)
+            r = requests.post(
+                f"{URL}/generate",
+                json={
+                    "input_ids": self._prompt_ids(PROMPTS[0], run),
+                    "soft_prompt": "tenant_b",
+                    "sampling_params": {"max_new_tokens": 4},
+                },
+                timeout=60,
+            )
             self.assertNotEqual(r.status_code, 200)
         finally:
             _stop(proc)
