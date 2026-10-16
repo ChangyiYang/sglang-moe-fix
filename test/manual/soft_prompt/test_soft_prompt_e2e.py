@@ -139,6 +139,17 @@ class TestSoftPromptE2E(unittest.TestCase):
                 "sampling_params": {"temperature": 0, "max_new_tokens": 96}}, timeout=600)
             self.assertEqual(r.status_code, 200, r.text)
             self.assertEqual(r.json()["output_ids"], got[0])
+            # Batched request: one soft-prompt item and one plain item.
+            plain = self._prompt_ids(PROMPTS[1], [])
+            r = requests.post(f"{URL}/generate", json={
+                "input_ids": [self._prompt_ids(PROMPTS[0], run), plain],
+                "soft_prompt": ["tenant_a", None],
+                "sampling_params": {"temperature": 0, "max_new_tokens": 96}}, timeout=600)
+            self.assertEqual(r.status_code, 200, r.text)
+            batch = r.json()
+            self.assertEqual(batch[0]["output_ids"], got[0])
+            ref_plain, _ = _generate(plain)
+            self.assertEqual(batch[1]["output_ids"], ref_plain)
             # Unloaded / unknown prompt is rejected cleanly.
             r = requests.post(f"{URL}/unload_soft_prompt", json={"name": "tenant_b"}, timeout=60)
             self.assertEqual(r.status_code, 200, r.text)

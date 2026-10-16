@@ -1,0 +1,86 @@
+---
+title: "Multi-Tenant Soft Prompts"
+metatags:
+    description: "Serve many per-tenant soft prompts (prompt tuning) on one base model: GPU soft-prompt pool, placeholder tokens, per-tenant prefix caching, dynamic loading."
+---
+SGLang can serve many [soft prompts](https://arxiv.org/abs/2104.08691) (learned prompt embeddings, one per tenant) on a single base model. Each request names a registered soft prompt; the positions of a placeholder run in its input receive that tenant's embeddings at prefill. Soft prompts are **input-only**: the vocabulary and LM head are untouched, and a 256-token prompt on a 4096-hidden model costs 2 MiB of GPU memory.
+
+## How it works
+
+* **Soft-prompt pool.** Loaded prompts live in a GPU buffer of `max_soft_prompts` slots × `max_soft_prompt_len` rows. It is allocated before the KV cache is sized, so its memory comes out of the KV budget.
+* **Placeholder tokens.** A request marks where its soft prompt goes with a contiguous run of `--soft-prompt-placeholder-id` (or the text marker `<|soft_prompt|>`, which is expanded to that run). At prefill, those positions get the tenant's embedding rows; everything else is embedded normally.
+* **Per-tenant prefix caching.** The placeholder ids are identical across tenants, so the request's prefix-cache key is namespaced by the soft prompt's name and version (the same mechanism that isolates LoRA adapters). Requests of the same tenant share the cached KV of the soft-prompt prefix; different tenants never do. Re-loading a prompt under the same name bumps its version, so stale cache entries are never reused.
+* **Never generated.** The placeholder id gets a large negative logit bias for soft-prompt requests.
+
+## Server arguments
+
+* `enable_soft_prompt`: Enable multi-tenant soft prompts.
+* `soft_prompt_placeholder_id`: Token id used as the placeholder (required). Use an id the model never needs as real text, e.g. an unused row of a padded vocabulary. For Qwen3, ids 151670–151935 are unused padding; avoid 151669, which some DFlash drafters use as their mask token.
+* `max_soft_prompts`: Number of pool slots (default 64).
+* `max_soft_prompt_len`: Maximum prompt length in tokens (default 1024). Pool memory is `max_soft_prompts × max_soft_prompt_len × hidden_size` elements.
+* `soft_prompt_paths`: Prompts to load at startup, as `NAME=PATH`.
+
+A soft prompt file is a safetensors file holding exactly one tensor of shape `[length, hidden_size]`. It is cast to the model's embedding dtype on load.
+
+## Usage
+
+```bash
+python -m sglang.launch_server --model-path Qwen/Qwen3-8B \
+  --enable-soft-prompt --soft-prompt-placeholder-id 151670 \
+  --max-soft-prompt-len 256 \
+  --soft-prompt-paths tenant_a=/path/to/tenant_a.safetensors
+```
+
+Load, replace, unload and list prompts at runtime:
+
+```bash
+curl -X POST localhost:30000/load_soft_prompt -d '{"name": "tenant_b", "path": "/path/to/tenant_b.safetensors"}'
+curl -X POST localhost:30000/unload_soft_prompt -d '{"name": "tenant_b"}'
+curl localhost:30000/list_soft_prompts       # {"tenant_a": {"length": 256, "version": 0}, ...}
+```
+
+Send a request with the text marker (expanded to the placeholder run):
+
+```python
+import requests
+
+text = "<|im_start|>user\n<|soft_prompt|>Write a function that reverses a list.<|im_end|>\n<|im_start|>assistant\n"
+r = requests.post("http://localhost:30000/generate", json={
+    "text": text,
+    "soft_prompt": "tenant_a",
+    "sampling_params": {"temperature": 0, "max_new_tokens": 256},
+})
+print(r.json()["text"])
+```
+
+or with token ids containing exactly one run of `length` placeholder ids:
+
+```python
+ids = prefix_ids + [151670] * 256 + suffix_ids
+requests.post("http://localhost:30000/generate", json={
+    "input_ids": ids, "soft_prompt": "tenant_a", "sampling_params": {"max_new_tokens": 256}})
+```
+
+`soft_prompt` also accepts a list for batched requests (one name or `None` per prompt).
+
+## Performance
+
+Qwen3-8B, 1× B300, 8 tenants with 256-token prompts, 256 requests at concurrency 32, 512 input / 256 output tokens:
+
+| | Output throughput | TTFT p50 |
+|---|---|---|
+| Without soft prompt | 6,179–6,333 tok/s | 131–145 ms |
+| With soft prompt | 6,026–6,158 tok/s | 168–225 ms |
+
+Decode runs with CUDA graphs as usual. Prefill batches that contain soft-prompt positions currently run eagerly, which is where the TTFT difference comes from (together with each tenant's first, uncached prefill of its prompt).
+
+## Correctness
+
+`test/manual/soft_prompt/test_soft_prompt_e2e.py` checks greedy outputs against a reference where the same prompt is baked into a checkpoint as extra vocabulary rows ("virtual tokens"): the outputs are token-for-token identical. It also checks prefix-cache reuse within a tenant, isolation across tenants with identical token ids, the text-marker path, and rejection after unload. CPU unit tests are in `test/manual/soft_prompt/test_soft_prompt_pool.py`.
+
+## Limitations
+
+* Only the native `/generate` endpoint accepts `soft_prompt`; the OpenAI-compatible endpoints do not yet.
+* Speculative decoding, data parallelism (`dp_size > 1`) and multimodal inputs are not supported together with soft prompts yet. Tensor parallelism (`tp_size > 1`) is untested.
+* Unloading a prompt while a request that uses it is still waiting for prefill makes that request fail.
+* The pool has no automatic eviction: loading into a full pool fails until a prompt is unloaded.
