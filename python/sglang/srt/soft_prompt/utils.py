@@ -18,10 +18,14 @@ def parse_soft_prompt_paths(paths: Optional[List[str]]) -> List[Tuple[str, str]]
     parsed = []
     for item in paths or []:
         if "=" not in item:
-            raise ValueError(f"--soft-prompt-paths entries must be NAME=PATH, got {item!r}")
+            raise ValueError(
+                f"--soft-prompt-paths entries must be NAME=PATH, got {item!r}"
+            )
         name, path = item.split("=", 1)
         if not name or not path:
-            raise ValueError(f"--soft-prompt-paths entries must be NAME=PATH, got {item!r}")
+            raise ValueError(
+                f"--soft-prompt-paths entries must be NAME=PATH, got {item!r}"
+            )
         parsed.append((name, path))
     names = [n for n, _ in parsed]
     if len(set(names)) != len(names):
@@ -34,8 +38,12 @@ def soft_prompt_length(path: str) -> int:
     with safe_open(path, framework="pt") as f:
         keys = list(f.keys())
         if len(keys) != 1:
-            raise ValueError(f"soft prompt file {path} must hold exactly one tensor, found {keys}")
+            raise ValueError(
+                f"soft prompt file {path} must hold exactly one tensor, found {keys}"
+            )
         shape = f.get_slice(keys[0]).get_shape()
     if len(shape) != 2:
-        raise ValueError(f"soft prompt tensor in {path} must be [length, hidden_size], got {shape}")
+        raise ValueError(
+            f"soft prompt tensor in {path} must be [length, hidden_size], got {shape}"
+        )
     return int(shape[0])
