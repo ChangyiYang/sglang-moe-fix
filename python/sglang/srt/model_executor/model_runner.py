@@ -841,8 +841,10 @@ class ModelRunner:
             dtype=weight.dtype,
             device=weight.device,
         )
-        for name, path in parse_soft_prompt_paths(lora_args.soft_prompt_paths):
-            pool.load(name, read_soft_prompt_tensor(path), version=0)
+        startup_prompts = parse_soft_prompt_paths(lora_args.soft_prompt_paths)
+        # Versions 1..k in argument order, matching the tokenizer-side registry.
+        for version, (name, path) in enumerate(startup_prompts, start=1):
+            pool.load(name, read_soft_prompt_tensor(path), version=version)
             logger.info("Loaded soft prompt %s from %s", name, path)
         set_soft_prompt_pool(pool)
 

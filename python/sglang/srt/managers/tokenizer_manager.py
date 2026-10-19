@@ -180,6 +180,7 @@ from sglang.srt.soft_prompt.utils import (
     SOFT_PROMPT_MARKER,
     parse_soft_prompt_paths,
     soft_prompt_length,
+    soft_prompt_token_ids,
 )
 from sglang.srt.utils import (
     configure_gc_warning,
@@ -792,13 +793,15 @@ class TokenizerManager(TokenizerControlMixin, TokenizerManagerScoreMixin):
         # Please note that, unlike `model_update_lock`, this does not block inference, allowing
         # LoRA updates and inference to overlap.
         self.lora_update_lock = asyncio.Lock()
-        # Soft prompts: name -> (length, version). Startup prompts get version 0; every
-        # dynamic (re)load gets a fresh version that is folded into the prefix-cache key.
+        # Soft prompts: name -> (length, version). Every (re)load gets a unique version
+        # (startup prompts 1..k in --soft-prompt-paths order, matching the pool), which
+        # selects the prompt's per-prompt token ids and hence its prefix-cache keys.
         self.soft_prompt_registry: Dict[str, Tuple[int, int]] = {}
-        self.soft_prompt_next_version = 1
         self.soft_prompt_update_lock = asyncio.Lock()
-        for name, path in parse_soft_prompt_paths(get_lora().soft_prompt_paths):
-            self.soft_prompt_registry[name] = (soft_prompt_length(path), 0)
+        startup_prompts = parse_soft_prompt_paths(get_lora().soft_prompt_paths)
+        for version, (name, path) in enumerate(startup_prompts, start=1):
+            self.soft_prompt_registry[name] = (soft_prompt_length(path), version)
+        self.soft_prompt_next_version = len(startup_prompts) + 1
         # A cache for mapping the lora_name for LoRA adapters that have been loaded at any
         # point to their latest LoRARef objects, so that they can be
         # dynamically loaded if needed for inference
@@ -1302,6 +1305,18 @@ class TokenizerManager(TokenizerControlMixin, TokenizerManagerScoreMixin):
             )
 
         self._validate_one_request(obj, input_ids)
+        if soft_prompt_meta is not None:
+            # After validation (which requires in-vocab ids): give the soft-prompt run its
+            # per-prompt ids so the prefix cache keys it by prompt and version.
+            _, sp_version, sp_start = soft_prompt_meta
+            sp_length = self.soft_prompt_registry[obj.soft_prompt][0]
+            input_ids = (
+                list(input_ids[:sp_start])
+                + soft_prompt_token_ids(
+                    sp_version, sp_length, get_lora().max_soft_prompt_len
+                )
+                + list(input_ids[sp_start + sp_length :])
+            )
         tokenized_obj = self._create_tokenized_object(
             obj, input_text, input_ids, input_embeds, mm_inputs, token_type_ids
         )

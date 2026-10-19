@@ -5,6 +5,7 @@ from sglang.srt.model_executor.forward_batch_info import ForwardBatch
 from sglang.srt.runtime_context import (
     get_disagg,
     get_exec,
+    get_lora,
     get_parallel,
     get_schedule,
     get_serving,
@@ -141,7 +142,10 @@ from sglang.srt.observability.req_time_stats import (
 from sglang.srt.sampling.sampling_batch_info import SamplingBatchInfo
 from sglang.srt.sampling.sampling_mask import SamplingMaskRows
 from sglang.srt.sampling.sampling_params import SamplingParams
-from sglang.srt.soft_prompt.scheduling import soft_prompt_extend_overrides
+from sglang.srt.soft_prompt.scheduling import (
+    map_soft_prompt_ids_for_model,
+    soft_prompt_extend_overrides,
+)
 from sglang.srt.utils import flatten_nested_list
 from sglang.srt.utils.token_sequence_matcher import TokenSequenceMatcher
 
@@ -2776,6 +2780,18 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
         # Init tensors
         reqs = self.reqs
         input_ids = [r.get_fill_ids()[r.prefix_len :] for r in reqs]
+        if any(r.soft_prompt is not None for r in reqs):
+            # Soft-prompt spans carry per-prompt ids (prefix-cache keys); the model gets the
+            # in-vocab placeholder id there and the prompt's embeddings via replace_embeds.
+            placeholder_id = get_lora().soft_prompt_placeholder_id
+            input_ids = [
+                (
+                    map_soft_prompt_ids_for_model(ids, placeholder_id)
+                    if r.soft_prompt is not None
+                    else ids
+                )
+                for r, ids in zip(reqs, input_ids)
+            ]
         extend_num_tokens = sum(len(ids) for ids in input_ids)
         seq_lens = [r.extend_end for r in reqs]
         orig_seq_lens = [max(r.extend_end, len(r.origin_input_ids)) for r in reqs]

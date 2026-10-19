@@ -1,6 +1,7 @@
 """CPU unit tests for the multi-tenant soft-prompt pool and prefill-override clipping."""
 
 import sys
+from array import array
 from types import SimpleNamespace
 
 import pytest
@@ -11,9 +12,17 @@ from sglang.srt.soft_prompt import pool as pool_mod
 from sglang.srt.soft_prompt.pool import SoftPromptPool, read_soft_prompt_tensor
 from sglang.srt.soft_prompt.scheduling import (
     SoftPromptRef,
+    map_soft_prompt_ids_for_model,
     soft_prompt_extend_overrides,
 )
-from sglang.srt.soft_prompt.utils import parse_soft_prompt_paths, soft_prompt_length
+from sglang.srt.soft_prompt.utils import (
+    SOFT_PROMPT_ID_BASE,
+    is_soft_prompt_id,
+    parse_soft_prompt_paths,
+    soft_prompt_length,
+    soft_prompt_token_ids,
+)
+from sglang.srt.speculative.eagle_utils import _rotate_replace_embeds_for_draft
 
 H = 8
 
@@ -92,6 +101,32 @@ def test_file_helpers(tmp_path):
         parse_soft_prompt_paths(["no-equals"])
     with pytest.raises(ValueError, match="duplicate"):
         parse_soft_prompt_paths([f"a={f}", f"a={f}"])
+
+
+def test_soft_prompt_token_ids_unique_per_version_and_mapped_back():
+    a = soft_prompt_token_ids(version=1, length=4, max_len=8)
+    b = soft_prompt_token_ids(version=2, length=4, max_len=8)
+    assert a == list(range(SOFT_PROMPT_ID_BASE + 8, SOFT_PROMPT_ID_BASE + 12))
+    assert not set(a) & set(b)  # reload -> different prefix-cache keys
+    assert all(is_soft_prompt_id(t) for t in a) and not is_soft_prompt_id(151669)
+    assert max(a + b) < 2**31  # stays int32-safe
+    with pytest.raises(ValueError, match="exhausted"):
+        soft_prompt_token_ids(version=2**31 // 8, length=4, max_len=8)
+    ids = array("q", [1, 2] + a + [3])
+    mapped = map_soft_prompt_ids_for_model(ids, placeholder_id=99)
+    assert isinstance(mapped, array) and list(mapped) == [1, 2, 99, 99, 99, 99, 3]
+    plain = array("q", [5, 6])
+    assert map_soft_prompt_ids_for_model(plain, 99) is plain
+
+
+def test_rotate_overrides_for_eagle_draft():
+    # Two requests with extend lengths 4 and 3 -> flat starts at 0 and 4.
+    emb = torch.arange(5, dtype=torch.float32).view(5, 1)
+    pos = torch.tensor([0, 1, 2, 4, 5])
+    e, p = _rotate_replace_embeds_for_draft(emb, pos, [4, 3])
+    assert p.tolist() == [0, 1, 4]  # 0 and 4 are request starts: no draft position
+    assert e.view(-1).tolist() == [1.0, 2.0, 4.0]
+    assert _rotate_replace_embeds_for_draft(emb[:1], pos[:1], [4, 3]) == (None, None)
 
 
 if __name__ == "__main__":

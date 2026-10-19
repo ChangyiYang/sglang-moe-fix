@@ -10,8 +10,27 @@ from safetensors import safe_open
 SOFT_PROMPT_MARKER = "<|soft_prompt|>"
 # Logit bias that keeps the input-only placeholder id from ever being sampled.
 SOFT_PROMPT_LOGIT_BIAS = -1.0e4
-# Prefix-cache namespace for a soft-prompt request (folded into Req.extra_key).
-SOFT_PROMPT_CACHE_KEY = "soft_prompt:{name}@v{version}"
+# Soft-prompt positions are stored in a request's token ids as per-prompt ids outside the
+# vocabulary (like multimodal pad values), so the prefix cache keys them per prompt and
+# version while tokens before the soft prompt stay shareable across tenants. The model
+# never sees these ids: they are mapped back to the placeholder id when building its input.
+# Range: above multimodal pad values ([1e6, 1e6 + 2**30)) and below int32 max.
+SOFT_PROMPT_ID_BASE = 1_200_000_000
+SOFT_PROMPT_ID_LIMIT = 2**31 - 1
+
+
+def soft_prompt_token_ids(version: int, length: int, max_len: int) -> List[int]:
+    """Per-prompt token ids for one (re)load of a soft prompt."""
+    start = SOFT_PROMPT_ID_BASE + version * max_len
+    if start + length > SOFT_PROMPT_ID_LIMIT:
+        raise ValueError(
+            "soft prompt id space exhausted; restart the server to reset versions"
+        )
+    return list(range(start, start + length))
+
+
+def is_soft_prompt_id(token_id: int) -> bool:
+    return token_id >= SOFT_PROMPT_ID_BASE
 
 
 def parse_soft_prompt_paths(paths: Optional[List[str]]) -> List[Tuple[str, str]]:

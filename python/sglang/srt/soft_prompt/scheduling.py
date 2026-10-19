@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+from array import array
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
 
 import torch
 
 from sglang.srt.soft_prompt.pool import get_soft_prompt_pool
-from sglang.srt.soft_prompt.utils import SOFT_PROMPT_CACHE_KEY
+from sglang.srt.soft_prompt.utils import is_soft_prompt_id
 
 
 @dataclass(frozen=True)
@@ -20,10 +21,12 @@ class SoftPromptRef:
 
 
 def attach_soft_prompt(req, recv_req) -> None:
-    """Record the request's soft prompt and namespace its prefix-cache key by it.
+    """Record the request's soft prompt (pool reference and placeholder span).
 
-    Placeholder tokens are identical across tenants, so without the namespace two tenants
-    with the same text would share KV computed from different embeddings.
+    Prefix-cache isolation needs no extra key: the soft-prompt span already carries
+    per-prompt, per-version token ids (see soft_prompt.utils.SOFT_PROMPT_ID_BASE), so the
+    radix tree diverges exactly where the soft prompt starts and tokens before it stay
+    shareable across tenants.
     """
     pool = get_soft_prompt_pool()
     entry = pool.entries.get(recv_req.soft_prompt) if pool is not None else None
@@ -37,12 +40,6 @@ def attach_soft_prompt(req, recv_req) -> None:
         version=recv_req.soft_prompt_version,
         start=recv_req.soft_prompt_start,
         length=entry.length,
-    )
-    namespace = SOFT_PROMPT_CACHE_KEY.format(
-        name=recv_req.soft_prompt, version=recv_req.soft_prompt_version
-    )
-    req.extra_key = (
-        namespace if req.extra_key is None else f"{req.extra_key}|{namespace}"
     )
 
 
@@ -63,3 +60,11 @@ def soft_prompt_extend_overrides(
     positions = [flat_offset + (p - pre_len) for p in range(lo, hi)]
     embeds = get_soft_prompt_pool().gather(ref.name, ref.version, offsets)
     return embeds, positions
+
+
+def map_soft_prompt_ids_for_model(token_ids, placeholder_id: int):
+    """Replace per-prompt soft-prompt ids (outside the vocabulary) by the placeholder id."""
+    if not any(is_soft_prompt_id(t) for t in token_ids):
+        return token_ids
+    mapped = [placeholder_id if is_soft_prompt_id(t) else t for t in token_ids]
+    return array("q", mapped) if isinstance(token_ids, array) else mapped

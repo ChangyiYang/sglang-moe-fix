@@ -1050,8 +1050,16 @@ class ForwardBatch(ForwardBatchDeepSeekMHAMixin):
             encoder_lens=batch.encoder_lens,
             encoder_out_cache_loc=batch.encoder_out_cache_loc,
             input_embeds=batch.input_embeds,
-            replace_embeds=batch.replace_embeds,
-            replace_positions=batch.replace_positions,
+            # Embedding overrides index the target's extend tokens. Draft models see a
+            # different token layout (EAGLE rotates ids left by one; DFlash feeds its own
+            # input_embeds), so they do not inherit them; EAGLE re-adds them rotated in
+            # _draft_extend_for_prefill.
+            replace_embeds=(
+                None if model_runner.is_draft_worker else batch.replace_embeds
+            ),
+            replace_positions=(
+                None if model_runner.is_draft_worker else batch.replace_positions
+            ),
             # Scalar config / flags
             return_logprob=batch.return_logprob,
             is_extend_in_batch=batch.is_extend_in_batch,
