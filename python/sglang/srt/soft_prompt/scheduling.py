@@ -41,7 +41,9 @@ def attach_soft_prompt(req, recv_req) -> None:
     namespace = SOFT_PROMPT_CACHE_KEY.format(
         name=recv_req.soft_prompt, version=recv_req.soft_prompt_version
     )
-    req.extra_key = namespace if req.extra_key is None else f"{req.extra_key}|{namespace}"
+    req.extra_key = (
+        namespace if req.extra_key is None else f"{req.extra_key}|{namespace}"
+    )
 
 
 def soft_prompt_extend_overrides(

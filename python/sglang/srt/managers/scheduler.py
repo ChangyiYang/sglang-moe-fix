@@ -119,12 +119,7 @@ from sglang.srt.lora.lora_drainer import LoRADrainer
 from sglang.srt.lora.lora_overlap_loader import LoRAOverlapLoader
 from sglang.srt.managers.disagg_service import maybe_create_ascend_config_store
 from sglang.srt.managers.hisparse_coordinator import HiSparseCoordinator
-from sglang.srt.soft_prompt.pool import get_soft_prompt_pool, read_soft_prompt_tensor
-from sglang.srt.soft_prompt.scheduling import attach_soft_prompt
 from sglang.srt.managers.io_struct import (
-    LoadSoftPromptReqInput,
-    SoftPromptUpdateOutput,
-    UnloadSoftPromptReqInput,
     AbortReq,
     ActiveRanksOutput,
     AddExternalCorpusReqInput,
@@ -164,6 +159,7 @@ from sglang.srt.managers.io_struct import (
     LoadLoRAAdapterFromTensorsReqOutput,
     LoadLoRAAdapterReqInput,
     LoadLoRAAdapterReqOutput,
+    LoadSoftPromptReqInput,
     MMInputsProcessError,
     OpenSessionReqInput,
     PauseGenerationReqInput,
@@ -183,10 +179,12 @@ from sglang.srt.managers.io_struct import (
     ShutdownReq,
     SlowDownReqInput,
     SlowDownReqOutput,
+    SoftPromptUpdateOutput,
     TokenizedEmbeddingReqInput,
     TokenizedGenerateReqInput,
     UnloadLoRAAdapterReqInput,
     UnloadLoRAAdapterReqOutput,
+    UnloadSoftPromptReqInput,
     UpdateWeightFromDiskReqInput,
     UpdateWeightsFromDistributedReqInput,
     UpdateWeightsFromIPCReqInput,
@@ -332,6 +330,8 @@ from sglang.srt.rust_server.server import RustServer
 from sglang.srt.sampling.sampling_batch_info import SamplingBatchInfo
 from sglang.srt.server_args import PortArgs, ServerArgs
 from sglang.srt.session.session_controller import SessionController
+from sglang.srt.soft_prompt.pool import get_soft_prompt_pool, read_soft_prompt_tensor
+from sglang.srt.soft_prompt.scheduling import attach_soft_prompt
 from sglang.srt.speculative.base_spec_worker import BaseSpecWorker
 from sglang.srt.speculative.dflash_utils import validate_dflash_request
 from sglang.srt.speculative.eagle_utils import (

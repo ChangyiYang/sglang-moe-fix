@@ -51,10 +51,8 @@ from sglang.srt.managers.io_struct import (
     LoadLoRAAdapterFromTensorsReqOutput,
     LoadLoRAAdapterReqInput,
     LoadLoRAAdapterReqOutput,
-    LoRAUpdateOutput,
     LoadSoftPromptReqInput,
-    SoftPromptUpdateOutput,
-    UnloadSoftPromptReqInput,
+    LoRAUpdateOutput,
     OpenSessionReqInput,
     PdRoleSwitchReqInput,
     PdRoleSwitchReqOutput,
@@ -74,8 +72,10 @@ from sglang.srt.managers.io_struct import (
     SetInternalStateReqOutput,
     SlowDownReqInput,
     SlowDownReqOutput,
+    SoftPromptUpdateOutput,
     UnloadLoRAAdapterReqInput,
     UnloadLoRAAdapterReqOutput,
+    UnloadSoftPromptReqInput,
     UpdateWeightsFromDistributedReqInput,
     UpdateWeightsFromDistributedReqOutput,
     UpdateWeightsFromIPCReqInput,
@@ -840,7 +840,9 @@ class TokenizerControlMixin:
                     "Soft prompts are not enabled. Please set `--enable-soft-prompt`."
                 )
             if get_parallel().dp_size != 1:
-                raise ValueError("data-parallel replicas are not supported for soft prompts")
+                raise ValueError(
+                    "data-parallel replicas are not supported for soft prompts"
+                )
             async with self.soft_prompt_update_lock:
                 obj.version = self.soft_prompt_next_version
                 self.soft_prompt_next_version += 1

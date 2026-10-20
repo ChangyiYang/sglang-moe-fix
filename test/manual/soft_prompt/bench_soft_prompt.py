@@ -36,21 +36,32 @@ def ids(with_sp):
 
 
 async def run(with_sp):
-    reqs = [(ids(with_sp), f"t{i % a.tenants}" if with_sp else None) for i in range(a.num)]
+    reqs = [
+        (ids(with_sp), f"t{i % a.tenants}" if with_sp else None) for i in range(a.num)
+    ]
     sem = asyncio.Semaphore(a.conc)
     ttft = []
 
     async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(limit=0)) as s:
+
         async def one(input_ids, sp):
             async with sem:
-                body = {"input_ids": input_ids, "stream": True,
-                        "sampling_params": {"temperature": 0, "max_new_tokens": a.out_len,
-                                            "ignore_eos": True}}
+                body = {
+                    "input_ids": input_ids,
+                    "stream": True,
+                    "sampling_params": {
+                        "temperature": 0,
+                        "max_new_tokens": a.out_len,
+                        "ignore_eos": True,
+                    },
+                }
                 if sp:
                     body["soft_prompt"] = sp
                 t0 = time.perf_counter()
                 first = None
-                async with s.post(f"http://127.0.0.1:{a.port}/generate", json=body) as r:
+                async with s.post(
+                    f"http://127.0.0.1:{a.port}/generate", json=body
+                ) as r:
                     r.raise_for_status()
                     async for line in r.content:
                         if first is None and line.startswith(b"data:"):
@@ -61,8 +72,12 @@ async def run(with_sp):
         await asyncio.gather(*[one(i, sp) for i, sp in reqs])
         dur = time.perf_counter() - t0
     ttft.sort()
-    return {"soft_prompt": with_sp, "out_tok_per_s": round(a.num * a.out_len / dur),
-            "ttft_p50_ms": round(ttft[len(ttft) // 2] * 1000, 1), "duration_s": round(dur, 1)}
+    return {
+        "soft_prompt": with_sp,
+        "out_tok_per_s": round(a.num * a.out_len / dur),
+        "ttft_p50_ms": round(ttft[len(ttft) // 2] * 1000, 1),
+        "duration_s": round(dur, 1),
+    }
 
 
 for with_sp in (False, True, False, True):

@@ -148,12 +148,6 @@ from sglang.srt.observability.request_metrics_exporter import (
     RequestMetricsExporterManager,
 )
 from sglang.srt.observability.trace import SpanAttributes, extract_trace_headers
-from sglang.srt.soft_prompt.utils import (
-    SOFT_PROMPT_LOGIT_BIAS,
-    SOFT_PROMPT_MARKER,
-    parse_soft_prompt_paths,
-    soft_prompt_length,
-)
 from sglang.srt.runtime_context import (
     assert_published,
     get_context,
@@ -180,6 +174,12 @@ from sglang.srt.sampling.watermarking.core import (
 from sglang.srt.server_args import (
     PortArgs,
     ServerArgs,
+)
+from sglang.srt.soft_prompt.utils import (
+    SOFT_PROMPT_LOGIT_BIAS,
+    SOFT_PROMPT_MARKER,
+    parse_soft_prompt_paths,
+    soft_prompt_length,
 )
 from sglang.srt.utils import (
     configure_gc_warning,
@@ -1328,7 +1328,9 @@ class TokenizerManager(TokenizerControlMixin, TokenizerManagerScoreMixin):
                 "soft_prompt was given but soft prompts are disabled; launch with --enable-soft-prompt."
             )
         if input_embeds is not None or mm_inputs is not None:
-            raise ValueError("soft_prompt cannot be combined with input_embeds or multimodal inputs.")
+            raise ValueError(
+                "soft_prompt cannot be combined with input_embeds or multimodal inputs."
+            )
         name = obj.soft_prompt
         if name not in self.soft_prompt_registry:
             raise ValueError(f"soft prompt {name!r} is not loaded.")

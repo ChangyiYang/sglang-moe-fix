@@ -52,7 +52,9 @@ class SoftPromptPool:
         device: torch.device,
     ):
         if max_prompts <= 0 or max_len <= 0:
-            raise ValueError("max_soft_prompts and max_soft_prompt_len must be positive")
+            raise ValueError(
+                "max_soft_prompts and max_soft_prompt_len must be positive"
+            )
         self.max_prompts = max_prompts
         self.max_len = max_len
         self.hidden_size = hidden_size
