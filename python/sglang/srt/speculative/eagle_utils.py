@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import itertools
 import logging
 import math
 from enum import IntEnum
@@ -89,6 +90,24 @@ def per_step_draft_out_cache_loc(
         .permute(2, 0, 1)
         .reshape(num_steps, -1)
     )
+
+
+def _rotate_replace_embeds_for_draft(replace_embeds, replace_positions, extend_lens):
+    """Shift flat extend-batch embedding overrides left by one token within each request.
+
+    EAGLE draft-extend reads each request's ids rotated left by one, so an override at
+    target position p belongs to draft position p - 1; one on a request's first extend
+    token has no draft position and is dropped.
+    """
+    starts = torch.tensor(
+        [0] + list(itertools.accumulate(extend_lens))[:-1],
+        device=replace_positions.device,
+        dtype=replace_positions.dtype,
+    )
+    keep = ~torch.isin(replace_positions, starts)
+    if not bool(keep.any()):
+        return None, None
+    return replace_embeds[keep], replace_positions[keep] - 1
 
 
 def _eagle_prefill_tail_tokens(

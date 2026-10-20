@@ -9,8 +9,9 @@ SGLang can serve many [soft prompts](https://arxiv.org/abs/2104.08691) (learned 
 
 * **Soft-prompt pool.** Loaded prompts live in a GPU buffer of `max_soft_prompts` slots × `max_soft_prompt_len` rows. It is allocated before the KV cache is sized, so its memory comes out of the KV budget.
 * **Placeholder tokens.** A request marks where its soft prompt goes with a contiguous run of `--soft-prompt-placeholder-id` (or the text marker `<|soft_prompt|>`, which is expanded to that run). At prefill, those positions get the tenant's embedding rows; everything else is embedded normally.
-* **Per-tenant prefix caching.** The placeholder ids are identical across tenants, so the request's prefix-cache key is namespaced by the soft prompt's name and version (the same mechanism that isolates LoRA adapters). Requests of the same tenant share the cached KV of the soft-prompt prefix; different tenants never do. Re-loading a prompt under the same name bumps its version, so stale cache entries are never reused.
+* **Per-prompt token ids for the prefix cache.** After tokenization, the placeholder run is rewritten to per-prompt ids outside the vocabulary (`1_200_000_000 + version × max_soft_prompt_len + position`, above the multimodal pad-value range), the same technique multimodal inputs use for images. The radix tree therefore diverges exactly where a soft prompt starts: text before it (e.g. a shared system prompt) is cached across tenants, the soft-prompt span is shared only by requests of the same prompt, and every (re)load gets a new version, so stale entries are never reused. The model never sees these ids; they are mapped back to the placeholder id when the batch's input is built.
 * **Never generated.** The placeholder id gets a large negative logit bias for soft-prompt requests.
+* **Speculative decoding.** Draft models do not inherit the target's embedding overrides. EAGLE/EAGLE-3 drafts, which share the target's embedding table, get the soft-prompt embeddings re-applied at their own (left-rotated) positions; DFlash drafts do not receive them; in testing, their drafting was identical to the virtual-token reference.
 
 ## Server arguments
 
@@ -76,11 +77,12 @@ Decode runs with CUDA graphs as usual. Prefill batches that contain soft-prompt 
 
 ## Correctness
 
-`test/manual/soft_prompt/test_soft_prompt_e2e.py` checks greedy outputs against a reference where the same prompt is baked into a checkpoint as extra vocabulary rows ("virtual tokens"): the outputs are token-for-token identical. It also checks prefix-cache reuse within a tenant, isolation across tenants with identical token ids, the text-marker path, and rejection after unload. CPU unit tests are in `test/manual/soft_prompt/test_soft_prompt_pool.py`.
+`test/manual/soft_prompt/test_soft_prompt_e2e.py` checks greedy outputs against a reference where the same prompt is baked into a checkpoint as extra vocabulary rows ("virtual tokens"): the outputs are token-for-token identical. It also checks prefix-cache reuse within a tenant, isolation across tenants with identical token ids, cross-tenant reuse of a shared system prompt before the soft prompt, reload invalidation, the text-marker path, batched mixed requests, and rejection after unload. With `SP_EAGLE3_DRAFT` / `SP_DFLASH_DRAFT` set, it also checks that speculative decoding on soft-prompt requests produces the same outputs **and the same number of verify steps** as the virtual-token reference, i.e. the drafter sees identical inputs. CPU unit tests are in `test/manual/soft_prompt/test_soft_prompt_pool.py`.
 
 ## Limitations
 
 * Only the native `/generate` endpoint accepts `soft_prompt`; the OpenAI-compatible endpoints do not yet.
-* Speculative decoding, data parallelism (`dp_size > 1`) and multimodal inputs are not supported together with soft prompts yet. Tensor parallelism (`tp_size > 1`) is untested.
+* Data parallelism (`dp_size > 1`) and multimodal inputs are not supported together with soft prompts yet. Tensor parallelism (`tp_size > 1`) is untested. Speculative decoding is tested with EAGLE-3 and DFlash on one GPU.
+* Input token ids echoed back (e.g. with input logprobs) show the per-prompt ids for the soft-prompt span.
 * Unloading a prompt while a request that uses it is still waiting for prefill makes that request fail.
 * The pool has no automatic eviction: loading into a full pool fails until a prompt is unloaded.

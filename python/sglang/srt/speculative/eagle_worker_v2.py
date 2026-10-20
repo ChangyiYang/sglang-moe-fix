@@ -92,6 +92,7 @@ from sglang.srt.speculative.eagle_info import (
 )
 from sglang.srt.speculative.eagle_utils import (
     _eagle_prefill_tail_tokens,
+    _rotate_replace_embeds_for_draft,
     default_tree_mask_mode,
     get_draft_recurrent_hidden_state_spec,
     organize_draft_results,
@@ -980,6 +981,15 @@ class EagleDraftWorker(EagleDraftWorkerBase):
         forward_batch.return_logprob = False
         if mm_input_embeds is not None:
             forward_batch.mm_input_embeds = mm_input_embeds
+        if batch.replace_embeds is not None and not batch.forward_mode.is_idle():
+            # The draft shares the target's embedding table, so embedding overrides such as
+            # soft prompts apply to it too, at positions rotated like its input ids.
+            (
+                forward_batch.replace_embeds,
+                forward_batch.replace_positions,
+            ) = _rotate_replace_embeds_for_draft(
+                batch.replace_embeds, batch.replace_positions, batch.extend_lens
+            )
 
         # Seed the first draft-decode loop from each request's last prefill
         # position. Gather last-per-req before the copy (prefill can be long).

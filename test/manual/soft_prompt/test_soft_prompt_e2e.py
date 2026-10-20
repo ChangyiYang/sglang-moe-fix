@@ -9,6 +9,7 @@ Env:
   SP_VIRTUAL_MODEL exported reference model dir containing soft_prompt_tokens.json
   SP_TENSOR       safetensors with the [length, hidden] soft prompt
   SP_PLACEHOLDER  placeholder token id for the pool path (an unused padded-vocab id)
+  SP_EAGLE3_DRAFT / SP_DFLASH_DRAFT  optional drafter paths for the speculative test
 Run on a GPU node:  python test_soft_prompt_e2e.py
 """
 
@@ -69,11 +70,11 @@ def _stop(proc):
         proc.kill()
 
 
-def _generate(input_ids, soft_prompt=None, max_new=96, logit_bias=None):
+def _generate(input_ids, soft_prompt=None, max_new=96, logit_bias=None, logprob=True):
     sp = {"temperature": 0, "max_new_tokens": max_new}
     if logit_bias:
         sp["logit_bias"] = logit_bias
-    body = {"input_ids": input_ids, "sampling_params": sp, "return_logprob": True}
+    body = {"input_ids": input_ids, "sampling_params": sp, "return_logprob": logprob}
     if soft_prompt:
         body["soft_prompt"] = soft_prompt
     r = requests.post(f"{URL}/generate", json=body, timeout=600)
@@ -94,8 +95,11 @@ class TestSoftPromptE2E(unittest.TestCase):
         cls.tensor_path = os.environ["SP_TENSOR"]
         cls.tok = AutoTokenizer.from_pretrained(cls.base)
 
-    def _prompt_ids(self, text, run):
-        pre = self.tok.encode("<|im_start|>user\n", add_special_tokens=False)
+    def _prompt_ids(self, text, run, system=None):
+        head = "<|im_start|>user\n"
+        if system:
+            head = f"<|im_start|>system\n{system}<|im_end|>\n" + head
+        pre = self.tok.encode(head, add_special_tokens=False)
         post = self.tok.encode(
             text + "<|im_end|>\n<|im_start|>assistant\n", add_special_tokens=False
         )
@@ -165,6 +169,44 @@ class TestSoftPromptE2E(unittest.TestCase):
             )
             self.assertLess(meta_b.get("cached_tokens", 0), length)
             self.assertNotEqual(out_b, got[0])
+            # A shared system prompt before the soft prompt is cached across tenants,
+            # while each tenant's soft-prompt span stays private.
+            system = " ".join(
+                ["You are a careful, concise programming assistant."] * 40
+            )
+            sys_len = len(
+                self.tok.encode(
+                    f"<|im_start|>system\n{system}<|im_end|>\n<|im_start|>user\n",
+                    add_special_tokens=False,
+                )
+            )
+            _generate(self._prompt_ids(PROMPTS[2], run, system), soft_prompt="tenant_a")
+            _, meta_shared = _generate(
+                self._prompt_ids(PROMPTS[2], run, system), soft_prompt="tenant_b"
+            )
+            cached = meta_shared.get("cached_tokens", 0)
+            # Prefix matches are page-aligned (e.g. page_size 64 with trtllm_mha).
+            page = int(
+                requests.get(f"{URL}/get_server_info", timeout=30)
+                .json()
+                .get("page_size")
+                or 1
+            )
+            self.assertGreaterEqual(cached, (sys_len - 1) // page * page)
+            self.assertGreater(cached, 0)
+            self.assertLess(cached, sys_len + length)
+            # Reloading a prompt changes its ids: its old cached span is not reused.
+            r = requests.post(
+                f"{URL}/load_soft_prompt",
+                json={"name": "tenant_a", "path": self.tensor_path},
+                timeout=120,
+            )
+            self.assertEqual(r.status_code, 200, r.text)
+            out_re, meta_re = _generate(
+                self._prompt_ids(PROMPTS[0], run), soft_prompt="tenant_a"
+            )
+            self.assertLess(meta_re.get("cached_tokens", 0), length)
+            self.assertEqual(out_re, got[0])  # same tensor -> same output
             # Text marker path expands to the same ids.
             text = (
                 "<|im_start|>user\n<|soft_prompt|>"
@@ -216,6 +258,103 @@ class TestSoftPromptE2E(unittest.TestCase):
         finally:
             _stop(proc)
             os.remove(other)
+
+    def test_spec_decoding_matches_virtual_reference(self):
+        """Speculative decoding on soft-prompt requests is lossless and drafts from the
+        same inputs as the virtual-token reference (identical verify-step counts)."""
+        drafters = []
+        if os.environ.get("SP_EAGLE3_DRAFT"):
+            drafters.append(
+                (
+                    "eagle3",
+                    True,
+                    [
+                        "--speculative-algorithm",
+                        "EAGLE3",
+                        "--speculative-draft-model-path",
+                        os.environ["SP_EAGLE3_DRAFT"],
+                        "--speculative-num-steps",
+                        "3",
+                        "--speculative-eagle-topk",
+                        "1",
+                        "--speculative-num-draft-tokens",
+                        "4",
+                    ],
+                )
+            )
+        if os.environ.get("SP_DFLASH_DRAFT"):
+            drafters.append(
+                (
+                    "dflash",
+                    False,
+                    [
+                        "--speculative-algorithm",
+                        "DFLASH",
+                        "--speculative-draft-model-path",
+                        os.environ["SP_DFLASH_DRAFT"],
+                    ],
+                )
+            )
+        if not drafters:
+            self.skipTest("set SP_EAGLE3_DRAFT and/or SP_DFLASH_DRAFT")
+        vids = self.meta["token_ids"]
+        length = len(vids)
+        run = [self.placeholder] * length
+        bias = {str(t): -1e4 for t in vids}
+        for name, exact_drafting, spec_args in drafters:
+            proc = _launch(self.virtual, spec_args)
+            try:
+                ref = [
+                    _generate(
+                        self._prompt_ids(p, vids),
+                        logit_bias=bias,
+                        max_new=192,
+                        logprob=False,
+                    )
+                    for p in PROMPTS
+                ]
+            finally:
+                _stop(proc)
+            proc = _launch(
+                self.base,
+                spec_args
+                + [
+                    "--enable-soft-prompt",
+                    "--soft-prompt-placeholder-id",
+                    str(self.placeholder),
+                    "--max-soft-prompt-len",
+                    str(max(length, 256)),
+                    "--soft-prompt-paths",
+                    f"tenant_a={self.tensor_path}",
+                ],
+            )
+            try:
+                got = [
+                    _generate(
+                        self._prompt_ids(p, run),
+                        soft_prompt="tenant_a",
+                        max_new=192,
+                        logprob=False,
+                    )
+                    for p in PROMPTS
+                ]
+            finally:
+                _stop(proc)
+            for i, ((ref_ids, ref_meta), (ids, meta)) in enumerate(zip(ref, got)):
+                print(
+                    f"[{name}] prompt {i}: verify_ct ref={ref_meta.get('spec_verify_ct')} "
+                    f"pool={meta.get('spec_verify_ct')} "
+                    f"accept ref={ref_meta.get('spec_accept_length')} "
+                    f"pool={meta.get('spec_accept_length')}",
+                    flush=True,
+                )
+                self.assertEqual(ids, ref_ids, f"[{name}] prompt {i}: outputs differ")
+                if exact_drafting:
+                    self.assertEqual(
+                        meta.get("spec_verify_ct"),
+                        ref_meta.get("spec_verify_ct"),
+                        f"[{name}] prompt {i}: drafter saw different inputs",
+                    )
 
 
 if __name__ == "__main__":
